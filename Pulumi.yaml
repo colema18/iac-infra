@@ -1,5 +1,5 @@
 name: iac-infra
-description: A minimal AWS TypeScript Pulumi program
+description: Deploy All Infra up through EKS Cluster
 runtime:
   name: nodejs
   options:
