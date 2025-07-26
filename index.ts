@@ -52,7 +52,6 @@ const clusterRole = new aws.iam.Role("clusterRole", {
     }),
 });
 
-// Attach required cluster policies
 new aws.iam.RolePolicyAttachment("clusterPolicyAttach", {
     role: clusterRole.name,
     policyArn: "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy",
@@ -63,167 +62,214 @@ new aws.iam.RolePolicyAttachment("clusterServicePolicyAttach", {
     policyArn: "arn:aws:iam::aws:policy/AmazonEKSServicePolicy",
 });
 
-// Node group role
 const nodeRole = new aws.iam.Role("nodeRole", {
     assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({
         Service: "ec2.amazonaws.com",
     }),
 });
 
-["AmazonEKSWorkerNodePolicy", "AmazonEKS_CNI_Policy", "AmazonEC2ContainerRegistryReadOnly"].forEach((policyName, i) => {
-    new aws.iam.RolePolicyAttachment(`nodePolicyAttach-${i}`, {
-        role: nodeRole.name,
-        policyArn: `arn:aws:iam::aws:policy/${policyName}`,
-    });
+["AmazonEKSWorkerNodePolicy", "AmazonEKS_CNI_Policy", "AmazonEC2ContainerRegistryReadOnly"].forEach(
+    (policyName, i) => {
+        new aws.iam.RolePolicyAttachment(`nodePolicyAttach-${i}`, {
+            role: nodeRole.name,
+            policyArn: `arn:aws:iam::aws:policy/${policyName}`,
+        });
+    }
+);
+
+// Security Group for Nodes
+const nodeSg = new aws.ec2.SecurityGroup("node-sg", {
+    vpcId: vpc.id,
+    ingress: [
+        { protocol: "tcp", fromPort: 80, toPort: 80, cidrBlocks: ["0.0.0.0/0"] },
+        { protocol: "tcp", fromPort: 5050, toPort: 5050, cidrBlocks: ["0.0.0.0/0"] },
+    ],
+    egress: [{ protocol: "-1", fromPort: 0, toPort: 0, cidrBlocks: ["0.0.0.0/0"] }],
+});
+
+// Security Group for Cluster API access
+const clusterSg = new aws.ec2.SecurityGroup("cluster-sg", {
+    vpcId: vpc.id,
+    ingress: [{ protocol: "tcp", fromPort: 443, toPort: 443, cidrBlocks: ["0.0.0.0/0"] }],
+    egress: [{ protocol: "-1", fromPort: 0, toPort: 0, cidrBlocks: ["0.0.0.0/0"] }],
 });
 
 // ------------------------
-// 3. EKS Cluster (latest version)
+// 3. EKS Cluster
 // ------------------------
 
 const cluster = new aws.eks.Cluster("my-cluster", {
     roleArn: clusterRole.arn,
     vpcConfig: {
         subnetIds: [subnet1.id, subnet2.id],
+        securityGroupIds: [clusterSg.id],
     },
 });
 
-// Managed Node Group
-const nodeGroup = new aws.eks.NodeGroup("my-node-group", {
-    clusterName: cluster.name,
-    nodeRoleArn: nodeRole.arn,
-    subnetIds: [subnet1.id, subnet2.id],
-    scalingConfig: { desiredSize: 2, minSize: 1, maxSize: 3 },
-    instanceTypes: ["t3.medium"],
-});
+const nodeGroup = new aws.eks.NodeGroup(
+    "my-node-group",
+    {
+        clusterName: cluster.name,
+        nodeRoleArn: nodeRole.arn,
+        subnetIds: [subnet1.id, subnet2.id],
+        scalingConfig: { desiredSize: 2, minSize: 1, maxSize: 3 },
+        instanceTypes: ["t3.medium"],
+    },
+    { dependsOn: [cluster, nodeRole] }
+);
 
 // ------------------------
-// 4. CoreDNS Addon
-// ------------------------
-
-const coreDnsVersion = aws.eks.getAddonVersionOutput({
-    addonName: "coredns",
-    kubernetesVersion: cluster.version,
-    mostRecent: true,
-});
-
-const coreDnsAddon = new aws.eks.Addon("coreDnsAddon", {
-    clusterName: cluster.name,
-    addonName: "coredns",
-    addonVersion: coreDnsVersion.version,
-    resolveConflictsOnUpdate: "PRESERVE",
-}, { dependsOn: cluster });
-
-// ------------------------
-// 5. Kubeconfig
+// 4. Kubeconfig & Provider
 // ------------------------
 
 const kubeconfig = pulumi.all([cluster.endpoint, cluster.certificateAuthority, cluster.name]).apply(
-  ([endpoint, certAuth, name]) => ({
-    apiVersion: "v1",
-    clusters: [{
-      cluster: {
-        server: endpoint,
-        "certificate-authority-data": certAuth.data,
-      },
-      name: "kubernetes",
-    }],
-    contexts: [{
-      context: { cluster: "kubernetes", user: "aws" },
-      name: "aws",
-    }],
-    "current-context": "aws",
-    kind: "Config",
-    users: [{
-      name: "aws",
-      user: {
-        exec: {
-          apiVersion: "client.authentication.k8s.io/v1beta1",
-          command: "aws",
-          args: ["eks", "get-token", "--cluster-name", name],
-        },
-      },
-    }],
-  })
+    ([endpoint, certAuth, name]) => ({
+        apiVersion: "v1",
+        clusters: [
+            {
+                cluster: {
+                    server: endpoint,
+                    "certificate-authority-data": certAuth.data,
+                },
+                name: "kubernetes",
+            },
+        ],
+        contexts: [
+            {
+                context: { cluster: "kubernetes", user: "aws" },
+                name: "aws",
+            },
+        ],
+        "current-context": "aws",
+        kind: "Config",
+        users: [
+            {
+                name: "aws",
+                user: {
+                    exec: {
+                        apiVersion: "client.authentication.k8s.io/v1beta1",
+                        command: "aws",
+                        args: ["eks", "get-token", "--cluster-name", name],
+                    },
+                },
+            },
+        ],
+    })
 );
 
 const provider = new k8s.Provider("k8s-provider", {
-  kubeconfig: kubeconfig.apply(JSON.stringify),
+    kubeconfig: kubeconfig.apply(JSON.stringify),
 });
 
 // ------------------------
-// 6. Backend Deployment & Service
+// 5. Backend Deployment & Service
 // ------------------------
 
-const backEndDeployment = new k8s.apps.v1.Deployment("backend-deployment", {
-    spec: {
-        selector: { matchLabels: { app: "backend" } },
-        replicas: 2,
-        template: {
-            metadata: { labels: { app: "backend" } },
-            spec: {
-                containers: [{
-                    name: "backend",
-                    image: "ghcr.io/colema18/hello-pulumi-app:latest",
-                    ports: [{ containerPort: 5050 }],
-                }],
+const backendLabels = { app: "backend" };
+
+const backEndDeployment = new k8s.apps.v1.Deployment(
+    "backend-deployment",
+    {
+        spec: {
+            selector: { matchLabels: backendLabels },
+            replicas: 2,
+            template: {
+                metadata: { labels: backendLabels },
+                spec: {
+                    containers: [
+                        {
+                            name: "backend",
+                            image: "ghcr.io/colema18/hello-pulumi-app:1.02",
+                            ports: [{ containerPort: 5050 }],
+                        },
+                    ],
+                },
             },
         },
     },
-}, { provider });
+    { provider }
+);
 
-const backEndService = new k8s.core.v1.Service("backend-service", {
-    spec: {
-        type: "ClusterIP",
-        selector: backEndDeployment.spec.template.metadata.labels,
-        ports: [{ port: 5050, targetPort: 5050 }],
+const backEndService = new k8s.core.v1.Service(
+    "backend-service",
+    {
+        spec: {
+            type: "LoadBalancer",
+            selector: backendLabels,
+            ports: [{ port: 5050, targetPort: 5050 }],
+        },
     },
-}, { provider });
+    { provider }
+);
 
 // ------------------------
-// 7. Frontend Deployment & Service
+// 6. Frontend Deployment & Service
 // ------------------------
 
-const frontEndDeployment = new k8s.apps.v1.Deployment("frontend-deployment", {
-    spec: {
-        selector: { matchLabels: { app: "frontend" } },
-        replicas: 2,
-        template: {
-            metadata: { labels: { app: "frontend" } },
-            spec: {
-                containers: [{
-                    name: "frontend",
-                    image: "ghcr.io/colema18/hello-pulumi-ui:latest",
-                    ports: [{ containerPort: 80 }],
-                    env: [{
-                        name: "API_URL",
-                        value: backEndService.metadata.apply(
-                          m => `http://${m.name}.${m.namespace}.svc.cluster.local:5050`
+const frontendLabels = { app: "frontend" };
+
+const apiUrl = backEndService.status.loadBalancer.ingress.apply((ingress) =>
+    ingress && ingress[0]?.hostname ? `http://${ingress[0].hostname}:5050` : ""
+);
+
+const frontEndDeployment = new k8s.apps.v1.Deployment(
+    "frontend-deployment",
+    {
+        spec: {
+            selector: { matchLabels: frontendLabels },
+            replicas: 2,
+            template: {
+                metadata: {
+                    labels: frontendLabels,
+                    annotations: {
+                        // 👇 Forces a redeploy when API URL changes
+                        "api-url-hash": apiUrl.apply((url) =>
+                            Buffer.from(url).toString("base64")
                         ),
-                    }],
-                }],
+                    },
+                },
+                spec: {
+                    containers: [
+                        {
+                            name: "frontend",
+                            image: "ghcr.io/colema18/hello-pulumi-ui:1.02",
+                            ports: [{ containerPort: 80 }],
+                            env: [{ name: "API_URL", value: apiUrl }],
+                        },
+                    ],
+                },
             },
         },
     },
-}, { provider });
+    { provider, dependsOn: backEndService }
+);
 
-const frontEndService = new k8s.core.v1.Service("frontend-service", {
-    spec: {
-        type: "LoadBalancer",
-        selector: frontEndDeployment.spec.template.metadata.labels,
-        ports: [{ port: 80, targetPort: 80 }],
+const frontEndService = new k8s.core.v1.Service(
+    "frontend-service",
+    {
+        spec: {
+            type: "LoadBalancer",
+            selector: frontendLabels,
+            ports: [{ port: 80, targetPort: 80 }],
+        },
     },
-}, { provider });
+    { provider }
+);
 
 // ------------------------
-// 8. Exports
+// 7. Exports
 // ------------------------
 
 export const kubeconfigOut = kubeconfig;
 
-export const frontEndUrl = frontEndService.status.loadBalancer.ingress.apply(
-  ingress =>
-    ingress && ingress[0]?.hostname
-      ? `http://${ingress[0].hostname}`
-      : "pending..."
+export const kubeconfigCmd = kubeconfig.apply(
+    () => `pulumi stack output kubeconfigOut > kubeconfig && KUBECONFIG=./kubeconfig kubectl get nodes`
+);
+
+export const backEndUrl = backEndService.status.loadBalancer.ingress.apply((ingress) =>
+    ingress && ingress[0]?.hostname ? `http://${ingress[0].hostname}:5050` : "pending..."
+);
+
+export const frontEndUrl = frontEndService.status.loadBalancer.ingress.apply((ingress) =>
+    ingress && ingress[0]?.hostname ? `http://${ingress[0].hostname}` : "pending..."
 );
