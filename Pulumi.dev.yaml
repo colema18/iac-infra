@@ -1,2 +1,3 @@
 environment:
   - environments/dev
+  - iac-infra/dev
