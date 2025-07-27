@@ -1,2 +1,4 @@
 environment:
-  - iac-infra/dev
+  name: coleman/iac-infra/dev
+  imports:
+    - iac-infra/dev
