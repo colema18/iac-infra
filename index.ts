@@ -6,6 +6,8 @@ import * as k8s from "@pulumi/kubernetes";
 // 1. Networking (VPC, Subnets, IGW, Routes)
 // ------------------------
 
+const azs = aws.getAvailabilityZones({ state: "available" });
+
 const vpc = new aws.ec2.Vpc("my-vpc", {
     cidrBlock: "10.0.0.0/16",
     enableDnsHostnames: true,
@@ -15,14 +17,14 @@ const vpc = new aws.ec2.Vpc("my-vpc", {
 const subnet1 = new aws.ec2.Subnet("my-subnet-1", {
     vpcId: vpc.id,
     cidrBlock: "10.0.1.0/24",
-    availabilityZone: "us-east-1a",
+    availabilityZone: pulumi.output(azs).apply(z => z.names[0]),
     mapPublicIpOnLaunch: true,
 });
 
 const subnet2 = new aws.ec2.Subnet("my-subnet-2", {
     vpcId: vpc.id,
     cidrBlock: "10.0.2.0/24",
-    availabilityZone: "us-east-1b",
+    availabilityZone: pulumi.output(azs).apply(z => z.names[1]),
     mapPublicIpOnLaunch: true,
 });
 
