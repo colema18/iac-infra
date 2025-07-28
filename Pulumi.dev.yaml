@@ -1,1 +1,2 @@
-environment: iac-infra/dev
+environment:
+  name: iac-infra/dev
