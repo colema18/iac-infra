@@ -17,14 +17,14 @@ const vpc = new aws.ec2.Vpc("my-vpc", {
 const subnet1 = new aws.ec2.Subnet("my-subnet-1", {
     vpcId: vpc.id,
     cidrBlock: "10.0.1.0/24",
-    availabilityZone: pulumi.output(azs).apply(z => z.names[0]),
+    availabilityZone: pulumi.output(azs).apply((z) => z.names[0]),
     mapPublicIpOnLaunch: true,
 });
 
 const subnet2 = new aws.ec2.Subnet("my-subnet-2", {
     vpcId: vpc.id,
     cidrBlock: "10.0.2.0/24",
-    availabilityZone: pulumi.output(azs).apply(z => z.names[1]),
+    availabilityZone: pulumi.output(azs).apply((z) => z.names[1]),
     mapPublicIpOnLaunch: true,
 });
 
@@ -45,7 +45,7 @@ new aws.ec2.RouteTableAssociation("rt-assoc-2", {
 });
 
 // ------------------------
-// 2. IAM Roles for EKS
+// 2. IAM Roles for EKS Cluster and Nodes
 // ------------------------
 
 const clusterRole = new aws.iam.Role("clusterRole", {
@@ -79,7 +79,10 @@ const nodeRole = new aws.iam.Role("nodeRole", {
     }
 );
 
-// Security Group for Nodes
+// ------------------------
+// 3. Security Groups
+// ------------------------
+
 const nodeSg = new aws.ec2.SecurityGroup("node-sg", {
     vpcId: vpc.id,
     ingress: [
@@ -89,7 +92,6 @@ const nodeSg = new aws.ec2.SecurityGroup("node-sg", {
     egress: [{ protocol: "-1", fromPort: 0, toPort: 0, cidrBlocks: ["0.0.0.0/0"] }],
 });
 
-// Security Group for Cluster API access
 const clusterSg = new aws.ec2.SecurityGroup("cluster-sg", {
     vpcId: vpc.id,
     ingress: [{ protocol: "tcp", fromPort: 443, toPort: 443, cidrBlocks: ["0.0.0.0/0"] }],
@@ -97,7 +99,7 @@ const clusterSg = new aws.ec2.SecurityGroup("cluster-sg", {
 });
 
 // ------------------------
-// 3. EKS Cluster
+// 4. EKS Cluster and NodeGroup
 // ------------------------
 
 const cluster = new aws.eks.Cluster("my-cluster", {
@@ -121,11 +123,67 @@ const nodeGroup = new aws.eks.NodeGroup(
 );
 
 // ------------------------
-// 4. Kubeconfig & Provider
+// 5. OIDC Provider and IRSA Role for AppConfig
 // ------------------------
 
-const kubeconfig = pulumi.all([cluster.endpoint, cluster.certificateAuthority, cluster.name]).apply(
-    ([endpoint, certAuth, name]) => ({
+const oidcProvider = new aws.iam.OpenIdConnectProvider("eksOidcProvider", {
+    clientIdLists: ["sts.amazonaws.com"],
+    thumbprintLists: ["9e99a48a9960b14926bb7f3b02e22da2b0ab7280"], // AWS root CA thumbprint
+    url: cluster.identities[0].oidcs[0].issuer,
+});
+
+const appConfigPolicy = new aws.iam.Policy("appConfigPolicy", {
+  policy: JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Action: [
+          "appconfig:GetConfiguration",
+          "appconfig:StartConfigurationSession",
+          "appconfig:GetLatestConfiguration",
+          "appconfigdata:StartConfigurationSession",
+          "appconfigdata:GetLatestConfiguration"
+        ],
+        Resource: "*"
+      }
+    ]
+  })
+});
+
+const appConfigRole = new aws.iam.Role("appConfigRole", {
+    assumeRolePolicy: pulumi.all([oidcProvider.url, oidcProvider.arn]).apply(([url, arn]) =>
+        JSON.stringify({
+            Version: "2012-10-17",
+            Statement: [
+                {
+                    Effect: "Allow",
+                    Principal: { Federated: arn },
+                    Action: "sts:AssumeRoleWithWebIdentity",
+                    Condition: {
+                        StringEquals: {
+                            [`${url.replace("https://", "")}:sub`]:
+                                "system:serviceaccount:default:hello-pulumi-app-sa",
+                        },
+                    },
+                },
+            ],
+        })
+    ),
+});
+
+new aws.iam.RolePolicyAttachment("appConfigRoleAttach", {
+    role: appConfigRole.name,
+    policyArn: appConfigPolicy.arn,
+});
+
+// ------------------------
+// 6. Kubeconfig Output
+// ------------------------
+
+const kubeconfig = pulumi
+    .all([cluster.endpoint, cluster.certificateAuthority, cluster.name])
+    .apply(([endpoint, certAuth, name]) => ({
         apiVersion: "v1",
         clusters: [
             {
@@ -156,15 +214,16 @@ const kubeconfig = pulumi.all([cluster.endpoint, cluster.certificateAuthority, c
                 },
             },
         ],
-    })
-);
+    }));
 
 // ------------------------
-// 5. Exports
+// 7. Exports
 // ------------------------
 
+export const appConfigRoleArn = appConfigRole.arn;
 export const kubeconfigOut = kubeconfig;
 
 export const kubeconfigCmd = kubeconfig.apply(
-    () => `pulumi stack output kubeconfigOut > kubeconfig && KUBECONFIG=./kubeconfig kubectl get nodes`
+    () =>
+        `pulumi stack output kubeconfigOut > kubeconfig && KUBECONFIG=./kubeconfig kubectl get nodes`
 );
