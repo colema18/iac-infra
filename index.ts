@@ -178,7 +178,7 @@ new aws.iam.RolePolicyAttachment("appConfigRoleAttach", {
 });
 
 // ------------------------
-// 6. Kubeconfig Output
+// 6. Kubeconfig Output & Exports
 // ------------------------
 
 const kubeconfig = pulumi
@@ -215,10 +215,6 @@ const kubeconfig = pulumi
             },
         ],
     }));
-
-// ------------------------
-// 7. Exports
-// ------------------------
 
 export const appConfigRoleArn = appConfigRole.arn;
 export const kubeconfigOut = kubeconfig;
