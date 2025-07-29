@@ -217,7 +217,8 @@ const kubeconfig = pulumi
     }));
 
 export const appConfigRoleArn = appConfigRole.arn;
-export const kubeconfigOut = kubeconfig;
+export const kubeconfigOut = kubeconfig.apply(cfg => JSON.stringify(cfg));
+
 
 export const kubeconfigCmd = kubeconfig.apply(
     () =>
