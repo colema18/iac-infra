@@ -8,29 +8,29 @@ import * as k8s from "@pulumi/kubernetes";
 
 const azs = aws.getAvailabilityZones({ state: "available" });
 
-const vpc = new aws.ec2.Vpc("my-vpc", {
+const vpc = new aws.ec2.Vpc("hello-pulumi-vpc", {
     cidrBlock: "10.0.0.0/16",
     enableDnsHostnames: true,
     enableDnsSupport: true,
 });
 
-const subnet1 = new aws.ec2.Subnet("my-subnet-1", {
+const subnet1 = new aws.ec2.Subnet("hello-pulumi-subnet-1", {
     vpcId: vpc.id,
     cidrBlock: "10.0.1.0/24",
     availabilityZone: pulumi.output(azs).apply((z) => z.names[0]),
     mapPublicIpOnLaunch: true,
 });
 
-const subnet2 = new aws.ec2.Subnet("my-subnet-2", {
+const subnet2 = new aws.ec2.Subnet("hello-pulumi-subnet-2", {
     vpcId: vpc.id,
     cidrBlock: "10.0.2.0/24",
     availabilityZone: pulumi.output(azs).apply((z) => z.names[1]),
     mapPublicIpOnLaunch: true,
 });
 
-const igw = new aws.ec2.InternetGateway("my-igw", { vpcId: vpc.id });
+const igw = new aws.ec2.InternetGateway("hello-pulumi-igw", { vpcId: vpc.id });
 
-const routeTable = new aws.ec2.RouteTable("my-route-table", {
+const routeTable = new aws.ec2.RouteTable("hello-pulumi-route-table", {
     vpcId: vpc.id,
     routes: [{ cidrBlock: "0.0.0.0/0", gatewayId: igw.id }],
 });
@@ -102,7 +102,7 @@ const clusterSg = new aws.ec2.SecurityGroup("cluster-sg", {
 // 4. EKS Cluster and NodeGroup
 // ------------------------
 
-const cluster = new aws.eks.Cluster("my-cluster", {
+const cluster = new aws.eks.Cluster("hello-pulumi-cluster", {
     roleArn: clusterRole.arn,
     vpcConfig: {
         subnetIds: [subnet1.id, subnet2.id],
@@ -111,7 +111,7 @@ const cluster = new aws.eks.Cluster("my-cluster", {
 });
 
 const nodeGroup = new aws.eks.NodeGroup(
-    "my-node-group",
+    "hello-pulumi-node-group",
     {
         clusterName: cluster.name,
         nodeRoleArn: nodeRole.arn,
